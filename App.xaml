@@ -1,0 +1,14 @@
+<Application x:Class="SimpleNote.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <!-- Modern Dark Scrollbar & Control Styles -->
+        <SolidColorBrush x:Key="TextPrimary" Color="#F3F4F6"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#9CA3AF"/>
+        <SolidColorBrush x:Key="TextMuted" Color="#6B7280"/>
+        <SolidColorBrush x:Key="AccentPurple" Color="#8B5CF6"/>
+        <SolidColorBrush x:Key="AccentGreen" Color="#10B981"/>
+        <SolidColorBrush x:Key="AccentGold" Color="#F59E0B"/>
+    </Application.Resources>
+</Application>
