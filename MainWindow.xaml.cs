@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -24,6 +25,7 @@ namespace SimpleNote
         private System.Windows.Forms.NotifyIcon? _notifyIcon;
         private readonly DispatcherTimer _saveDebounceTimer;
         private readonly DispatcherTimer _toastTimer;
+        private readonly DispatcherTimer _fullscreenCheckTimer;
 
         private double _expandedWidth;
         private double _expandedHeight;
@@ -33,6 +35,7 @@ namespace SimpleNote
         private bool _isExpanded = false;
         private bool _isPinned = false;
         private bool _isMasterHidden = false;
+        private bool _isFullscreenHidden = false;
         private bool _isAnimating = false;
         private bool _isEnforcingListStructure = false;
 
@@ -63,6 +66,13 @@ namespace SimpleNote
                 ToastBadge.BeginAnimation(UIElement.OpacityProperty, fadeOut);
             };
 
+            // Fullscreen application detection polling timer (checks every 600ms)
+            _fullscreenCheckTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(600)
+            };
+            _fullscreenCheckTimer.Tick += FullscreenCheckTimer_Tick;
+
             InitializeTray();
         }
 
@@ -90,6 +100,9 @@ namespace SimpleNote
 
             // Attach TextChanged event handler AFTER component initialization and initial load
             NoteEditor.TextChanged += NoteEditor_TextChanged;
+
+            // Start polling for fullscreen applications
+            _fullscreenCheckTimer.Start();
 
             // Position initially in collapsed edge-handle state
             CollapsePanelImmediate();
@@ -120,7 +133,7 @@ namespace SimpleNote
 
         private void ExpandPanel()
         {
-            if (_isExpanded || _isMasterHidden) return;
+            if (_isExpanded || _isMasterHidden || _isFullscreenHidden) return;
 
             RecalculateDimensions();
             Rect workArea = SystemParameters.WorkArea;
@@ -853,9 +866,14 @@ namespace SimpleNote
             }
             else
             {
-                this.Visibility = Visibility.Visible;
-                RecalculateDimensions();
-                CollapsePanelImmediate();
+                if (!_isFullscreenHidden)
+                {
+                    this.Visibility = Visibility.Visible;
+                    this.Topmost = false;
+                    this.Topmost = true;
+                    RecalculateDimensions();
+                    CollapsePanelImmediate();
+                }
             }
         }
 
@@ -940,7 +958,10 @@ namespace SimpleNote
             if (_isMasterHidden)
             {
                 ToggleMasterVisibility();
-                ExpandPanel();
+                if (!_isFullscreenHidden)
+                {
+                    ExpandPanel();
+                }
                 return;
             }
 
@@ -986,6 +1007,7 @@ namespace SimpleNote
 
         private void MenuExit_Click(object sender, RoutedEventArgs e)
         {
+            _fullscreenCheckTimer.Stop();
             NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
 
             if (_notifyIcon != null)
@@ -1000,6 +1022,7 @@ namespace SimpleNote
 
         protected override void OnClosed(EventArgs e)
         {
+            _fullscreenCheckTimer.Stop();
             NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
 
             if (_notifyIcon != null)
@@ -1011,6 +1034,133 @@ namespace SimpleNote
 
             base.OnClosed(e);
         }
+
+        #region Fullscreen Detection Service
+
+        private void FullscreenCheckTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_isMasterHidden) return;
+
+            bool isFullscreen = CheckIsForegroundFullscreen();
+
+            if (isFullscreen && !_isFullscreenHidden)
+            {
+                _isFullscreenHidden = true;
+
+                // Collapse immediately if expanded and unpinned
+                if (_isExpanded && !_isPinned)
+                {
+                    CollapsePanelImmediate();
+                }
+
+                this.Visibility = Visibility.Hidden;
+            }
+            else if (!isFullscreen && _isFullscreenHidden)
+            {
+                _isFullscreenHidden = false;
+
+                // Restore window and re-apply Topmost and bounds
+                this.Visibility = Visibility.Visible;
+                this.Topmost = false;
+                this.Topmost = true;
+                RecalculateDimensions();
+                CollapsePanelImmediate();
+            }
+        }
+
+        private bool CheckIsForegroundFullscreen()
+        {
+            try
+            {
+                IntPtr fgHwnd = NativeMethods.GetForegroundWindow();
+                if (fgHwnd == IntPtr.Zero) return false;
+
+                var myHwnd = new WindowInteropHelper(this).Handle;
+                if (myHwnd != IntPtr.Zero && fgHwnd == myHwnd) return false;
+
+                IntPtr rootHwnd = NativeMethods.GetAncestor(fgHwnd, NativeMethods.GA_ROOT);
+                if (rootHwnd != IntPtr.Zero) fgHwnd = rootHwnd;
+
+                if (myHwnd != IntPtr.Zero && fgHwnd == myHwnd) return false;
+
+                // Ignore desktop and shell windows
+                var sb = new System.Text.StringBuilder(256);
+                NativeMethods.GetClassName(fgHwnd, sb, sb.Capacity);
+                string className = sb.ToString();
+
+                if (string.Equals(className, "Progman", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(className, "WorkerW", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(className, "Shell_TrayWnd", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(className, "Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                long styleLong = NativeMethods.GetWindowLongPtr(fgHwnd, NativeMethods.GWL_STYLE).ToInt64();
+                int style = unchecked((int)styleLong);
+
+                // Window must be visible and not minimized
+                if ((style & NativeMethods.WS_VISIBLE) == 0 || (style & NativeMethods.WS_MINIMIZE) != 0)
+                {
+                    return false;
+                }
+
+                if (!NativeMethods.IsWindowVisible(fgHwnd) || NativeMethods.IsIconic(fgHwnd))
+                {
+                    return false;
+                }
+
+                // Determine monitors
+                IntPtr myMonitor = myHwnd != IntPtr.Zero
+                    ? NativeMethods.MonitorFromWindow(myHwnd, NativeMethods.MONITOR_DEFAULTTOPRIMARY)
+                    : NativeMethods.MonitorFromWindow(IntPtr.Zero, NativeMethods.MONITOR_DEFAULTTOPRIMARY);
+
+                IntPtr fgMonitor = NativeMethods.MonitorFromWindow(fgHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+
+                if (myMonitor != IntPtr.Zero && fgMonitor != IntPtr.Zero && myMonitor != fgMonitor)
+                {
+                    return false;
+                }
+
+                var mi = new NativeMethods.MONITORINFO();
+                mi.cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>();
+                if (!NativeMethods.GetMonitorInfo(fgMonitor, ref mi))
+                {
+                    return false;
+                }
+
+                if (!NativeMethods.GetWindowRect(fgHwnd, out NativeMethods.RECT rect))
+                {
+                    return false;
+                }
+
+                // Check if rect covers the entire monitor
+                bool coversMonitor = rect.Left <= mi.rcMonitor.Left &&
+                                     rect.Top <= mi.rcMonitor.Top &&
+                                     rect.Right >= mi.rcMonitor.Right &&
+                                     rect.Bottom >= mi.rcMonitor.Bottom;
+
+                if (!coversMonitor)
+                {
+                    return false;
+                }
+
+                // Check if it covers the taskbar or has popup/borderless style
+                bool coversTaskbar = rect.Bottom > mi.rcWork.Bottom || rect.Top < mi.rcWork.Top ||
+                                     rect.Right > mi.rcWork.Right || rect.Left < mi.rcWork.Left;
+
+                bool isPopupOrBorderless = ((uint)style & NativeMethods.WS_POPUP) != 0 ||
+                                           (style & NativeMethods.WS_CAPTION) != NativeMethods.WS_CAPTION;
+
+                return coversTaskbar || isPopupOrBorderless;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        #endregion
 
         #endregion
     }
