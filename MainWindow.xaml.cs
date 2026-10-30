@@ -50,8 +50,7 @@ namespace SimpleNote
             };
             _saveDebounceTimer.Tick += (s, e) =>
             {
-                _saveDebounceTimer.Stop();
-                NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
+                SaveNotesNow();
             };
 
             // Toast notification timer
@@ -83,6 +82,15 @@ namespace SimpleNote
             // Strip window from Windows Alt+Tab and Task View via Win32 WS_EX_TOOLWINDOW
             var hwnd = new WindowInteropHelper(this).Handle;
             NativeMethods.SetToolWindow(hwnd);
+
+            // Hook Win32 window messages to intercept OS shutdown and restart
+            var source = HwndSource.FromHwnd(hwnd);
+            source?.AddHook(WndProc);
+
+            // Hook system session ending events for PC shutdown / restart / logoff
+            Microsoft.Win32.SystemEvents.SessionEnding += SystemEvents_SessionEnding;
+            Microsoft.Win32.SystemEvents.SessionEnded += SystemEvents_SessionEnded;
+            AppDomain.CurrentDomain.ProcessExit += CurrentDomain_ProcessExit;
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -100,6 +108,8 @@ namespace SimpleNote
 
             // Attach TextChanged event handler AFTER component initialization and initial load
             NoteEditor.TextChanged += NoteEditor_TextChanged;
+            NoteEditor.LostFocus += (s, e) => SaveNotesNow();
+            this.Deactivated += (s, e) => SaveNotesNow();
 
             // Start polling for fullscreen applications
             _fullscreenCheckTimer.Start();
@@ -470,8 +480,23 @@ namespace SimpleNote
                 {
                     foreach (var li in list.ListItems)
                     {
-                        var tr = new TextRange(li.ContentStart, li.ContentEnd);
-                        string line = tr.Text.Trim();
+                        string line;
+                        if (li.Blocks.FirstBlock is Paragraph p)
+                        {
+                            var tr = new TextRange(p.ContentStart, p.ContentEnd);
+                            line = tr.Text.Trim();
+                        }
+                        else
+                        {
+                            var tr = new TextRange(li.ContentStart, li.ContentEnd);
+                            line = tr.Text.Trim();
+                        }
+
+                        if (line.StartsWith("•"))
+                        {
+                            line = line.TrimStart('•', ' ', '\t');
+                        }
+
                         if (!string.IsNullOrEmpty(line))
                         {
                             if (sb.Length > 0) sb.AppendLine();
@@ -483,6 +508,10 @@ namespace SimpleNote
                 {
                     var tr = new TextRange(p.ContentStart, p.ContentEnd);
                     string line = tr.Text.Trim();
+                    if (line.StartsWith("•"))
+                    {
+                        line = line.TrimStart('•', ' ', '\t');
+                    }
                     if (!string.IsNullOrEmpty(line))
                     {
                         if (sb.Length > 0) sb.AppendLine();
@@ -1005,10 +1034,63 @@ namespace SimpleNote
             ClearButton_Click(sender, e);
         }
 
+        public void SaveNotesNow()
+        {
+            try
+            {
+                _saveDebounceTimer?.Stop();
+                string content = GetNoteContent();
+                NoteStorage.SaveNotes(content, _isPinned);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"SaveNotesNow error: {ex.Message}");
+            }
+        }
+
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            const int WM_QUERYENDSESSION = 0x0011;
+            const int WM_ENDSESSION = 0x0016;
+
+            if (msg == WM_QUERYENDSESSION)
+            {
+                SaveNotesNow();
+                handled = true;
+                return (IntPtr)1; // Acknowledge and allow session shutdown
+            }
+            else if (msg == WM_ENDSESSION)
+            {
+                if (wParam != IntPtr.Zero)
+                {
+                    SaveNotesNow();
+                }
+                handled = true;
+                return IntPtr.Zero;
+            }
+
+            return IntPtr.Zero;
+        }
+
+        private void SystemEvents_SessionEnding(object? sender, Microsoft.Win32.SessionEndingEventArgs e)
+        {
+            SaveNotesNow();
+        }
+
+        private void SystemEvents_SessionEnded(object? sender, Microsoft.Win32.SessionEndedEventArgs e)
+        {
+            SaveNotesNow();
+        }
+
+        private void CurrentDomain_ProcessExit(object? sender, EventArgs e)
+        {
+            SaveNotesNow();
+        }
+
         private void MenuExit_Click(object sender, RoutedEventArgs e)
         {
             _fullscreenCheckTimer.Stop();
-            NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
+            SaveNotesNow();
 
             if (_notifyIcon != null)
             {
@@ -1022,8 +1104,17 @@ namespace SimpleNote
 
         protected override void OnClosed(EventArgs e)
         {
+            SaveNotesNow();
+
+            try
+            {
+                Microsoft.Win32.SystemEvents.SessionEnding -= SystemEvents_SessionEnding;
+                Microsoft.Win32.SystemEvents.SessionEnded -= SystemEvents_SessionEnded;
+                AppDomain.CurrentDomain.ProcessExit -= CurrentDomain_ProcessExit;
+            }
+            catch { }
+
             _fullscreenCheckTimer.Stop();
-            NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
 
             if (_notifyIcon != null)
             {
