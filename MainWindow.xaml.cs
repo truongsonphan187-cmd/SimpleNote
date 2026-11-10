@@ -37,6 +37,7 @@ namespace SimpleNote
         private bool _isMasterHidden = false;
         private bool _isFullscreenHidden = false;
         private bool _isAnimating = false;
+        private bool _isCollapsing = false;
         private bool _isEnforcingListStructure = false;
 
         public MainWindow()
@@ -143,41 +144,73 @@ namespace SimpleNote
 
         private void ExpandPanel()
         {
-            if (_isExpanded || _isMasterHidden || _isFullscreenHidden) return;
+            if (_isExpanded || _isAnimating || _isMasterHidden || _isFullscreenHidden) return;
 
             RecalculateDimensions();
             Rect workArea = SystemParameters.WorkArea;
 
             _isAnimating = true;
+            _isCollapsing = false;
 
-            // Switch to full expanded window bounds
+            // 1. Position offscreen transform BEFORE anything becomes visible to prevent any flash or ghosting
+            SlideTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            SlideTransform.X = _expandedWidth;
+
+            // 2. Set full expanded window bounds
             this.Left = workArea.Right - _expandedWidth;
             this.Top = _expandedTop;
             this.Width = _expandedWidth;
             this.Height = _expandedHeight;
 
+            // 3. Make ExpandedContainer visible (it is clean and offscreen at X = _expandedWidth)
             CollapsedHandle.Visibility = Visibility.Collapsed;
+            CollapsedHandle.IsHitTestVisible = false;
             EdgeTriggerStrip.Visibility = Visibility.Collapsed;
+            EdgeTriggerStrip.IsHitTestVisible = false;
             ExpandedContainer.Visibility = Visibility.Visible;
             ExpandedContainer.IsHitTestVisible = true;
 
-            // Start slide-in animation from right edge to 0
-            SlideTransform.X = _expandedWidth;
-            var slideIn = new DoubleAnimation
+            // 4. Force synchronous layout pass now so measurement, fonts, and Direct3D buffers are fully created
+            this.UpdateLayout();
+
+            // 5. Use hardware bitmap caching during animation for silky smooth 60fps/120fps GPU translation
+            var dpi = VisualTreeHelper.GetDpi(this);
+            ExpandedContainer.CacheMode = new BitmapCache
             {
-                From = _expandedWidth,
-                To = 0.0,
-                Duration = TimeSpan.FromMilliseconds(240),
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                EnableClearType = false,
+                SnapsToDevicePixels = false,
+                RenderAtScale = Math.Max(1.0, dpi.DpiScaleX)
             };
 
-            slideIn.Completed += (s, e) =>
+            // 6. Begin animation on the next render pass so frame 0 starts with zero dropped frames
+            Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
             {
-                _isAnimating = false;
-                _isExpanded = true;
-            };
+                if (_isMasterHidden || _isFullscreenHidden || !_isAnimating)
+                {
+                    ExpandedContainer.CacheMode = null;
+                    return;
+                }
 
-            SlideTransform.BeginAnimation(TranslateTransform.XProperty, slideIn);
+                var slideIn = new DoubleAnimation
+                {
+                    From = _expandedWidth,
+                    To = 0.0,
+                    Duration = TimeSpan.FromMilliseconds(240),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+
+                slideIn.Completed += (s, e) =>
+                {
+                    SlideTransform.X = 0.0;
+                    SlideTransform.BeginAnimation(TranslateTransform.XProperty, null);
+                    ExpandedContainer.CacheMode = null;
+                    _isAnimating = false;
+                    _isCollapsing = false;
+                    _isExpanded = true;
+                };
+
+                SlideTransform.BeginAnimation(TranslateTransform.XProperty, slideIn);
+            }));
         }
 
         private void CollapsePanel()
@@ -185,20 +218,33 @@ namespace SimpleNote
             if (!_isExpanded || _isPinned || _isMasterHidden) return;
 
             _isAnimating = true;
+            _isCollapsing = true;
+
+            var dpi = VisualTreeHelper.GetDpi(this);
+            ExpandedContainer.CacheMode = new BitmapCache
+            {
+                EnableClearType = false,
+                SnapsToDevicePixels = false,
+                RenderAtScale = Math.Max(1.0, dpi.DpiScaleX)
+            };
 
             var slideOut = new DoubleAnimation
             {
                 From = SlideTransform.X,
                 To = _expandedWidth,
-                Duration = TimeSpan.FromMilliseconds(190),
+                Duration = TimeSpan.FromMilliseconds(200),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
             };
 
             slideOut.Completed += (s, e) =>
             {
+                SlideTransform.X = _expandedWidth;
+                SlideTransform.BeginAnimation(TranslateTransform.XProperty, null);
+                ExpandedContainer.CacheMode = null;
                 _isAnimating = false;
+                _isCollapsing = false;
 
-                if (!IsMouseOver && !_isPinned)
+                if (!_isPinned)
                 {
                     CollapsePanelImmediate();
                     NoteStorage.SaveNotes(GetNoteContent(), _isPinned);
@@ -212,10 +258,14 @@ namespace SimpleNote
         {
             SlideTransform.BeginAnimation(TranslateTransform.XProperty, null);
             SlideTransform.X = 0;
+            ExpandedContainer.CacheMode = null;
 
             ExpandedContainer.Visibility = Visibility.Collapsed;
+            ExpandedContainer.IsHitTestVisible = false;
             CollapsedHandle.Visibility = Visibility.Visible;
+            CollapsedHandle.IsHitTestVisible = false;
             EdgeTriggerStrip.Visibility = Visibility.Visible;
+            EdgeTriggerStrip.IsHitTestVisible = true;
 
             Rect workArea = SystemParameters.WorkArea;
             this.Left = workArea.Right - HandleWidth;
@@ -225,6 +275,7 @@ namespace SimpleNote
 
             _isExpanded = false;
             _isAnimating = false;
+            _isCollapsing = false;
         }
 
         private void EdgeTriggerStrip_MouseEnter(object sender, MouseEventArgs e)
@@ -247,37 +298,67 @@ namespace SimpleNote
             ExpandPanel();
         }
 
-        private void ExpandedHandle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-        {
-            if (_isExpanded)
-            {
-                if (_isPinned) SetPinState(false);
-                CollapsePanel();
-            }
-        }
-
         private void Window_MouseLeave(object sender, MouseEventArgs e)
         {
-            if (_isExpanded && !_isPinned && !_isMasterHidden)
+            if (!_isExpanded || _isPinned || _isMasterHidden) return;
+
+            // If the mouse cursor is still at the extreme right edge / screen bezel,
+            // the user is hovering at the edge of the note, NOT leaving the note window!
+            if (NativeMethods.GetCursorPos(out var pt))
             {
-                CollapsePanel();
+                Rect workArea = SystemParameters.WorkArea;
+                if (pt.X >= workArea.Right - 20 &&
+                    pt.Y >= _expandedTop - 10 &&
+                    pt.Y <= _expandedTop + _expandedHeight + 10)
+                {
+                    // Ignore false boundary MouseLeave when cursor touches the right bezel
+                    return;
+                }
             }
+
+            CollapsePanel();
         }
 
         private void ExpandedContainer_MouseEnter(object sender, MouseEventArgs e)
         {
-            if (_isAnimating && SlideTransform.X > 0)
+            // Only reverse animation if currently in the process of collapsing
+            if (_isCollapsing && SlideTransform.X < _expandedWidth * 0.75)
             {
+                // If cursor is resting against the extreme right screen bezel, do not trigger an oscillation loop
+                if (NativeMethods.GetCursorPos(out var pt))
+                {
+                    Rect workArea = SystemParameters.WorkArea;
+                    if (pt.X >= workArea.Right - 20)
+                    {
+                        return;
+                    }
+                }
+
+                _isCollapsing = false;
+                _isAnimating = true;
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                ExpandedContainer.CacheMode = new BitmapCache
+                {
+                    EnableClearType = false,
+                    SnapsToDevicePixels = false,
+                    RenderAtScale = Math.Max(1.0, dpi.DpiScaleX)
+                };
+
                 var slideBack = new DoubleAnimation
                 {
                     From = SlideTransform.X,
                     To = 0.0,
-                    Duration = TimeSpan.FromMilliseconds(180),
+                    Duration = TimeSpan.FromMilliseconds(200),
                     EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
                 };
                 slideBack.Completed += (s, args) =>
                 {
+                    SlideTransform.X = 0.0;
+                    SlideTransform.BeginAnimation(TranslateTransform.XProperty, null);
+                    ExpandedContainer.CacheMode = null;
                     _isAnimating = false;
+                    _isCollapsing = false;
                     _isExpanded = true;
                 };
                 SlideTransform.BeginAnimation(TranslateTransform.XProperty, slideBack);
@@ -1130,7 +1211,7 @@ namespace SimpleNote
 
         private void FullscreenCheckTimer_Tick(object? sender, EventArgs e)
         {
-            if (_isMasterHidden) return;
+            if (_isMasterHidden || _isAnimating) return;
 
             bool isFullscreen = CheckIsForegroundFullscreen();
 

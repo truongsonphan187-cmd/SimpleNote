@@ -176,11 +176,7 @@
                 Background="#800D0D11"
                 BorderBrush="#40FFFFFF"
                 BorderThickness="1,1,0,1"
-                IsHitTestVisible="False">
-            <Border.Effect>
-                <DropShadowEffect BlurRadius="8" ShadowDepth="0" Color="#000000" Opacity="0.4"/>
-            </Border.Effect>
-        </Border>
+                IsHitTestVisible="False"/>
 
         <!-- Dedicated Invisible Edge Trigger Strip: Only triggers expansion when cursor hits the absolute extreme screen edge -->
         <Border x:Name="EdgeTriggerStrip"
@@ -198,6 +194,8 @@
         <Grid x:Name="ExpandedContainer"
               Visibility="Collapsed"
               IsHitTestVisible="True"
+              SnapsToDevicePixels="False"
+              UseLayoutRounding="False"
               MouseEnter="ExpandedContainer_MouseEnter">
             <!-- Smooth slide-in/out transform -->
             <Grid.RenderTransform>
@@ -207,10 +205,8 @@
             <Grid.ColumnDefinitions>
                 <!-- Main Note Card (Takes available width) -->
                 <ColumnDefinition Width="*" />
-                <!-- Hit-Test Bridge: Continuous invisible bridge between card and edge -->
-                <ColumnDefinition Width="10" />
-                <!-- Expanded Edge Tab (Flush against screen bezel) -->
-                <ColumnDefinition Width="6" />
+                <!-- Hit-Test Bridge: Continuous invisible bridge between card and screen edge -->
+                <ColumnDefinition Width="16" />
             </Grid.ColumnDefinitions>
 
             <!-- Column 0: Dark Acrylic Glassmorphism Note Card -->
@@ -219,11 +215,7 @@
                     Background="#E6101116"
                     BorderBrush="#30FFFFFF"
                     BorderThickness="1"
-                    Margin="0,0,0,0"
-                    ClipToBounds="False">
-                <Border.Effect>
-                    <DropShadowEffect BlurRadius="32" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.65"/>
-                </Border.Effect>
+                    Margin="0,0,0,0">
 
                 <Grid>
                     <Grid.RowDefinitions>
@@ -398,23 +390,11 @@
                 </Grid>
             </Border>
 
-            <!-- Column 1: Invisible Hit-Test Bridge -->
+            <!-- Column 1: Invisible Hit-Test Bridge (Flush with screen bezel) -->
             <!-- Background="#00000000" covers gap to prevent premature MouseLeave -->
             <Border Grid.Column="1"
                     Background="#00000000"
                     Cursor="Arrow"/>
-
-            <!-- Column 2: Edge Tab in Expanded State (Flush with screen edge) -->
-            <Border Grid.Column="2"
-                    Width="6"
-                    Height="170"
-                    VerticalAlignment="Center"
-                    CornerRadius="6,0,0,6"
-                    Background="#800D0D11"
-                    BorderBrush="#40FFFFFF"
-                    BorderThickness="1,1,0,1"
-                    Cursor="Hand"
-                    MouseLeftButtonDown="ExpandedHandle_MouseLeftButtonDown"/>
         </Grid>
     </Grid>
 </Window>
